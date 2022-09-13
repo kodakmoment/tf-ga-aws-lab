@@ -1,0 +1,133 @@
+name: Terraform PR
+
+on:
+  pull_request:
+    paths:
+      - 'terraform/**'
+
+env:
+  AWS_REGION: "eu-north-1"
+  TF_VERSION: "1.2.8"
+  PREFIX: "kodak-lab"
+  AWS_ACCOUNT_ID: "zzz"
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  create_matrix:
+    runs-on: ubuntu-latest
+
+    outputs:
+      folder_matrix: "${{ steps.create_folder_matrix.outputs.matrix }}"
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+
+      - name: "Find changed terraform configs"
+        id: changed-tf
+        uses: tj-actions/changed-files@v29.0.2
+
+      - name: "Find changed terraform configs"
+        uses: nahsi/files-to-matrix@v1.0.1
+        if: steps.changed-tf.outputs.any_changed == 'true'
+        id: create_folder_matrix
+        with:
+          files: "${{ steps.changed-tf.outputs.all_changed_files }}"
+          settings: >-
+            [
+              {
+                "name": "folder",
+                "level": 1
+              }
+            ]
+  tf_plan_pr:
+    if: needs.create_matrix.outputs.folder_matrix
+    needs: create_matrix
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        tf: "${{ fromJSON(needs.create_matrix.outputs.folder_matrix) }}"
+
+    defaults:
+      run:
+        working-directory: "terraform/${{ matrix.tf.folder }}"
+
+    env:
+      WORKING_DIR: "terraform/${{ matrix.tf.folder }}"
+
+    steps:
+    - name: Checkout Repo
+      uses: actions/checkout@v3
+
+    - name: configure aws credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.PREFIX }}-github-oidc
+        role-session-name: ${{ env.PREFIX }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: GitHubAuth
+      id: gitpat
+      run: |
+        git config --global credential.https://github.com.helper store
+        echo "https://${{ secrets.GIT_PAT }}:x-oauth-basic@github.com" > ~/.git-credentials
+
+    - name: Terraform Install
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Terraform Format
+      id: fmt
+      run: terraform fmt -check
+
+    - name: Terraform Init
+      id: init
+      run: terraform init
+
+    - name: Terraform Validate
+      id: validate
+      run: terraform validate -no-color
+
+    - name: Terraform Plan
+      id: planpr
+      run: terraform plan -no-color
+
+    - name: GitHub Issue Create Comment
+      uses: actions/github-script@v5.1.1
+      env:
+        PLAN: "${{ steps.planpr.outputs.stdout }}"
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+          #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+          #### Terraform Validation 🤖 ${{ steps.validate.outputs.stdout }}
+          #### Terraform Plan 📖\`${{ steps.planpr.outcome }}\`
+      
+          <details><summary>Show Plan</summary>
+      
+          \`\`\`\n
+          ${process.env.PLAN}
+          \`\`\`
+      
+          </details>
+      
+          *TF Version: \`${{ env.TF_VERSION }}\`, Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ env.WORKING_DIR }}\`, Workflow: \`${{ github.workflow }}\`*`;
+        
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: output
+          })

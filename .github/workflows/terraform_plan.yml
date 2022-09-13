@@ -1,0 +1,87 @@
+name: Terraform Plan
+
+on:
+  push:
+    paths:
+      - 'terraform/**'
+    branches-ignore:
+      - 'main'
+
+env:
+  AWS_REGION: "eu-north-1"
+  TF_VERSION: "1.2.8"
+  PREFIX: "kodak-lab"
+  AWS_ACCOUNT_ID: "zzz"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  create_matrix:
+    runs-on: ubuntu-latest
+
+    outputs:
+      folder_matrix: "${{ steps.create_folder_matrix.outputs.matrix }}"
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 2
+
+      - name: "Find changed terraform configs"
+        id: changed-tf
+        uses: tj-actions/changed-files@v29.0.2
+
+      - name: "Find changed terraform configs"
+        uses: nahsi/files-to-matrix@v1.0.1
+        if: steps.changed-tf.outputs.any_changed == 'true'
+        id: create_folder_matrix
+        with:
+          files: "${{ steps.changed-tf.outputs.all_changed_files }}"
+          settings: >-
+            [
+              {
+                "name": "folder",
+                "level": 1
+              }
+            ]
+  tf_plan:
+    if: needs.create_matrix.outputs.folder_matrix
+    needs: create_matrix
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        tf: "${{ fromJSON(needs.create_matrix.outputs.folder_matrix) }}"
+
+    defaults:
+      run:
+        working-directory: "terraform/${{ matrix.tf.folder }}"
+
+    steps:
+    - name: Checkout Repo
+      uses: actions/checkout@v3
+
+    - name: configure aws credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/${{ env.PREFIX }}-github-oidc
+        role-session-name: ${{ env.PREFIX }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Terraform Install
+      uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Terraform Init
+      id: init
+      run: terraform init
+
+    - name: Terraform Plan
+      id: plan
+      run: terraform plan
